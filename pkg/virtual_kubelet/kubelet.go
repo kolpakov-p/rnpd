@@ -1,7 +1,6 @@
 package runpod
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -16,8 +15,6 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"log/slog"
 	"net/http"
-	"os"
-	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -114,7 +111,7 @@ func NewProvider(ctx context.Context, nodeName, operatingSystem string, internal
 	// Initialize provider
 	provider.checkRunPodAPIHealth()
 	provider.cleanupStuckTerminatingPods()
-	
+
 	// Start background processes
 	go provider.startPeriodicStatusUpdates()
 	go provider.startPeriodicCleanup()
@@ -129,10 +126,10 @@ func NewProvider(ctx context.Context, nodeName, operatingSystem string, internal
 func (p *Provider) CreatePod(ctx context.Context, pod *v1.Pod) error {
 	// Store the pod in our tracking map
 	podKey := fmt.Sprintf("%s-%s", pod.Namespace, pod.Name)
-	
+
 	// Get the requested ports for this pod
 	requestedPorts := p.runpodClient.GetRequestedPorts(pod)
-	
+
 	p.podsMutex.Lock()
 	p.pods[podKey] = pod.DeepCopy()
 	p.podStatus[podKey] = &InstanceInfo{
@@ -313,7 +310,7 @@ func (p *Provider) checkPortsExposed(portMappings map[string]int, requestedPorts
 	if len(requestedPorts) == 0 {
 		return true
 	}
-	
+
 	// Extract the exposed ports from RunPod's port mappings
 	// The map key is the internal port (as a string), value is the external port
 	exposedPorts := make(map[string]bool)
@@ -323,14 +320,14 @@ func (p *Provider) checkPortsExposed(portMappings map[string]int, requestedPorts
 		exposedPorts[internalPort+"/tcp"] = true
 		exposedPorts[internalPort+"/http"] = true
 	}
-	
+
 	// Check if all requested ports are exposed
 	for _, requestedPort := range requestedPorts {
 		if exposedPorts[requestedPort] {
 			// Port is explicitly in portMappings
 			continue
 		}
-		
+
 		// Handle RunPod's different behavior for HTTP vs TCP ports
 		// HTTP ports might not appear in portMappings but are handled by RunPod's proxy
 		if strings.HasSuffix(requestedPort, "/http") {
@@ -338,14 +335,14 @@ func (p *Provider) checkPortsExposed(portMappings map[string]int, requestedPorts
 				"requestedPort", requestedPort)
 			continue
 		}
-		
+
 		// For TCP ports, they must be in portMappings to be considered exposed
 		p.logger.Debug("Requested TCP port not yet exposed",
 			"requestedPort", requestedPort,
 			"exposedPorts", exposedPorts)
 		return false
 	}
-	
+
 	return true
 }
 
@@ -614,7 +611,7 @@ func (p *Provider) updateAllPodStatuses() {
 		// Update pod info if status changed OR port exposure changed
 		statusChanged := string(status) != podInfo.Status
 		portsExposureChanged := hasExposedPorts != podInfo.PortsExposed
-		
+
 		if statusChanged || portsExposureChanged {
 			// Update status in our tracking map
 			p.podsMutex.Lock()
@@ -1267,7 +1264,7 @@ func (p *Provider) LoadRunning() {
 			p.CreateVirtualPod(runpodInstance)
 		}
 	}
-	
+
 	// Log exited pods for visibility but don't create K8s pods for them
 	for _, runpodInstance := range exitedPods {
 		if _, exists := existingRunPodMap[runpodInstance.ID]; !exists {
