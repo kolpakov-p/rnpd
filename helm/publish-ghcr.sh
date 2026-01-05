@@ -5,7 +5,7 @@ set -e
 
 # Get chart version
 CHART_VERSION=$(grep '^version:' ./helm/runpod-kubelet/Chart.yaml | awk '{print $2}')
-GITHUB_OWNER="${GITHUB_OWNER:-bsvogler}"
+GITHUB_OWNER="${GITHUB_OWNER:-kolpakov-p}"
 
 echo "Packaging Helm chart version $CHART_VERSION..."
 

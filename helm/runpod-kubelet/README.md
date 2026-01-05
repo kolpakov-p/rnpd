@@ -13,7 +13,7 @@ This Helm chart deploys the RunPod Virtual Kubelet to your Kubernetes cluster, a
 ### Option 1: Install from GitHub Container Registry
 
 ```bash
-helm install runpod-kubelet oci://ghcr.io/bsvogler/helm/runpod-kubelet \
+helm install runpod-kubelet oci://ghcr.io/kolpakov-p/helm/runpod-kubelet \
   --namespace kube-system \
   --set runpod.apiKey=YOUR_RUNPOD_API_KEY
 ```
@@ -47,7 +47,7 @@ The following table lists the configurable parameters and their default values:
 | Parameter | Description | Default |
 |-----------|-------------|---------|
 | `replicaCount` | Number of replicas | `1` |
-| `image.repository` | Image repository | `ghcr.io/bsvogler/runpod-kubelet` |
+| `image.repository` | Image repository | `ghcr.io/kolpakov-p/runpod-kubelet` |
 | `image.tag` | Image tag | `latest` |
 | `image.pullPolicy` | Image pull policy | `IfNotPresent` |
 | `imagePullSecrets` | Image pull secrets | `[{name: regcred}]` |

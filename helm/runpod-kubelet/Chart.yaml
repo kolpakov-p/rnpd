@@ -4,11 +4,11 @@ description: A Helm chart for deploying RunPod Virtual Kubelet
 type: application
 version: 0.1.0
 appVersion: "latest"
-home: https://github.com/bsvogler/k8s-runpod-kubelet
+home: https://github.com/kolpakov-p/rnpd
 sources:
-  - https://github.com/bsvogler/k8s-runpod-kubelet
+  - https://github.com/kolpakov-p/rnpd
 maintainers:
-  - name: bsvogler
+  - name: kolpakov-p
 keywords:
   - runpod
   - virtual-kubelet

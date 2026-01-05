@@ -1,7 +1,7 @@
 replicaCount: 1
 
 image:
-  repository: ghcr.io/bsvogler/runpod-kubelet
+  repository: ghcr.io/kolpakov-p/runpod-kubelet
   pullPolicy: Always
   tag: "latest"
 
