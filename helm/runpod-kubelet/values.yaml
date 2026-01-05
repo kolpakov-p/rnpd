@@ -44,14 +44,11 @@ kubelet:
 
 cluster:
   identifier: ""  # If empty, a unique identifier will be generated
-  
+
 runpod:
   apiKey: ""
   existingSecret: "runpod-kubelet-secrets"
 
-conduit:
-  apiToken: ""
-  
 health:
   port: 8080
   livenessProbe:
