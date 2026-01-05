@@ -52,7 +52,7 @@ runpod:
 health:
   port: 8080
   livenessProbe:
-    enabled: true
+#    enabled: true
     httpGet:
       path: /healthz
       port: 8080
@@ -60,7 +60,7 @@ health:
     periodSeconds: 10
     timeoutSeconds: 5
   readinessProbe:
-    enabled: true
+#    enabled: true
     httpGet:
       path: /readyz
       port: 8080
