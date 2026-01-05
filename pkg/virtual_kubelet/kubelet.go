@@ -43,249 +43,6 @@ type Provider struct {
 	podsMutex   sync.RWMutex             // Mutex for thread-safe access to pods maps
 	notifyFunc  func(*v1.Pod)            // Function called when pod status changes
 	notifyMutex sync.RWMutex             // Mutex for thread-safe access to notify function
-	
-	// Heartbeat configuration
-	heartbeatInterval time.Duration      // Interval between heartbeats
-	heartbeatStop     chan struct{}      // Channel to stop heartbeat goroutine
-	heartbeatCtx      context.Context    // Context for heartbeat operations
-	heartbeatCancel   context.CancelFunc // Cancel function for heartbeat context
-}
-
-// RegistrationPayload represents the data sent to the conduit registration endpoint
-type RegistrationPayload struct {
-	ClusterName  string            `json:"cluster_name"`
-	Namespace    string            `json:"namespace"`
-	NodeName     string            `json:"node_name"`
-	Version      *string           `json:"version"`
-	Capabilities []string          `json:"capabilities"`
-	Metadata     map[string]string `json:"metadata"`
-}
-
-// registerWithConduit registers the kubelet with the conduit service
-func (p *Provider) registerWithConduit() error {
-	apiToken := os.Getenv("CONDUIT_API_TOKEN")
-	if apiToken == "" {
-		// Get conduit host for error message
-		conduitHost := os.Getenv("CONDUIT_HOST")
-		if conduitHost == "" {
-			conduitHost = "https://gpuconduit.io"
-		}
-		return fmt.Errorf("CONDUIT_API_TOKEN is required but not set. Please register at %s to obtain your API token", conduitHost)
-	}
-
-	// Get cluster name from environment or generate one
-	clusterName := os.Getenv("CLUSTER_NAME")
-	if clusterName == "" {
-		clusterName = "k8s-runpod-cluster"
-	}
-
-	// Get namespace (default to kube-system if not set)
-	namespace := os.Getenv("NAMESPACE")
-	if namespace == "" {
-		namespace = "kube-system"
-	}
-
-	// Get version info
-	version := runtime.Version()
-
-	// Define capabilities
-	capabilities := []string{
-		"gpu-scheduling",
-		"runpod-integration",
-		"virtual-kubelet",
-	}
-
-	// Create metadata
-	metadata := map[string]string{
-		"provider":         "runpod",
-		"operating_system": p.operatingSystem,
-		"internal_ip":      p.internalIP,
-		"go_version":       runtime.Version(),
-		"arch":             runtime.GOARCH,
-		"os":               runtime.GOOS,
-	}
-
-	payload := RegistrationPayload{
-		ClusterName:  clusterName,
-		Namespace:    namespace,
-		NodeName:     p.nodeName,
-		Version:      &version,
-		Capabilities: capabilities,
-		Metadata:     metadata,
-	}
-
-	payloadBytes, err := json.Marshal(payload)
-	if err != nil {
-		return fmt.Errorf("failed to marshal registration payload: %w", err)
-	}
-
-	// Get conduit host from environment or use default
-	conduitHost := os.Getenv("CONDUIT_HOST")
-	if conduitHost == "" {
-		conduitHost = "https://gpuconduit.io"
-	}
-	
-	// Create HTTP request
-	req, err := http.NewRequest("PUT", conduitHost+"/api/kubelet/register", bytes.NewBuffer(payloadBytes))
-	if err != nil {
-		return fmt.Errorf("failed to create registration request: %w", err)
-	}
-
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+apiToken)
-
-	// Make the request
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return fmt.Errorf("failed to make registration request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		if resp.StatusCode == http.StatusUnauthorized {
-			return fmt.Errorf("authentication failed - invalid API token. Please register at %s/dashboard/installation/ to obtain a valid API token", conduitHost)
-		}
-		return fmt.Errorf("registration failed with status %d: %s. Please check your account status at %s", resp.StatusCode, string(body), conduitHost)
-	}
-
-	p.logger.Info("Successfully registered with conduit service",
-		"cluster_name", clusterName,
-		"namespace", namespace,
-		"node_name", p.nodeName)
-
-	// Start heartbeat after successful registration
-	p.startHeartbeat()
-
-	return nil
-}
-
-// sendHeartbeat sends a heartbeat to the conduit service using the same registration call
-func (p *Provider) sendHeartbeat() error {
-	apiToken := os.Getenv("CONDUIT_API_TOKEN")
-	if apiToken == "" {
-		// If no API token, skip heartbeat silently
-		return nil
-	}
-
-	// Get conduit host from environment or use default
-	conduitHost := os.Getenv("CONDUIT_HOST")
-	if conduitHost == "" {
-		conduitHost = "https://gpuconduit.io"
-	}
-
-	// Get cluster name from environment or generate one
-	clusterName := os.Getenv("CLUSTER_NAME")
-	if clusterName == "" {
-		clusterName = "k8s-runpod-cluster"
-	}
-
-	// Get namespace (default to kube-system if not set)
-	namespace := os.Getenv("NAMESPACE")
-	if namespace == "" {
-		namespace = "kube-system"
-	}
-
-	// Get version info
-	version := runtime.Version()
-
-	// Define capabilities
-	capabilities := []string{
-		"gpu-scheduling",
-		"runpod-integration",
-		"virtual-kubelet",
-	}
-
-	// Create metadata
-	metadata := map[string]string{
-		"provider":         "runpod",
-		"operating_system": p.operatingSystem,
-		"internal_ip":      p.internalIP,
-		"go_version":       runtime.Version(),
-		"arch":             runtime.GOARCH,
-		"os":               runtime.GOOS,
-	}
-
-	payload := RegistrationPayload{
-		ClusterName:  clusterName,
-		Namespace:    namespace,
-		NodeName:     p.nodeName,
-		Version:      &version,
-		Capabilities: capabilities,
-		Metadata:     metadata,
-	}
-
-	payloadBytes, err := json.Marshal(payload)
-	if err != nil {
-		return fmt.Errorf("failed to marshal heartbeat payload: %w", err)
-	}
-
-	// Create HTTP request with timeout
-	ctx, cancel := context.WithTimeout(p.heartbeatCtx, 10*time.Second)
-	defer cancel()
-
-	req, err := http.NewRequestWithContext(ctx, "PUT", conduitHost+"/api/kubelet/register", bytes.NewBuffer(payloadBytes))
-	if err != nil {
-		return fmt.Errorf("failed to create heartbeat request: %w", err)
-	}
-
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+apiToken)
-
-	// Make the request
-	client := &http.Client{Timeout: 15 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return fmt.Errorf("failed to send heartbeat: %w", err)
-	}
-	defer resp.Body.Close()
-
-	// Log success or warning based on response
-	if resp.StatusCode == http.StatusOK {
-		p.logger.Debug("Heartbeat sent successfully")
-	} else {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("heartbeat failed with status %d: %s", resp.StatusCode, string(body))
-	}
-
-	return nil
-}
-
-// startHeartbeat starts sending periodic heartbeats to the conduit service
-func (p *Provider) startHeartbeat() {
-	// Skip if heartbeat is disabled (interval is 0 or negative)
-	if p.heartbeatInterval <= 0 {
-		return
-	}
-
-	go func() {
-		ticker := time.NewTicker(p.heartbeatInterval)
-		defer ticker.Stop()
-
-		for {
-			select {
-			case <-ticker.C:
-				if err := p.sendHeartbeat(); err != nil {
-					p.logger.Warn("Heartbeat failed", "error", err)
-				}
-			case <-p.heartbeatStop:
-				return
-			case <-p.heartbeatCtx.Done():
-				return
-			}
-		}
-	}()
-}
-
-// StopHeartbeat stops the heartbeat goroutine
-func (p *Provider) StopHeartbeat() {
-	if p.heartbeatCancel != nil {
-		p.heartbeatCancel()
-	}
-	if p.heartbeatStop != nil {
-		close(p.heartbeatStop)
-	}
 }
 
 // startPeriodicStatusUpdates polls the RunPod API to keep pod statuses up to date
@@ -332,13 +89,10 @@ func (p *Provider) checkRunPodAPIHealth() {
 
 // NewProvider creates a new RunPod virtual kubelet provider
 func NewProvider(ctx context.Context, nodeName, operatingSystem string, internalIP string,
-	daemonEndpointPort int, config config.Config, clientset *kubernetes.Clientset, logger *slog.Logger, heartbeatIntervalSec int) (*Provider, error) {
+	daemonEndpointPort int, config config.Config, clientset *kubernetes.Clientset, logger *slog.Logger) (*Provider, error) {
 
 	// Create a new RunPod client and pass the clientset and config
 	runpodClient := NewRunPodClient(logger, clientset, &config)
-
-	// Initialize heartbeat context
-	heartbeatCtx, heartbeatCancel := context.WithCancel(ctx)
 
 	provider := &Provider{
 		nodeName:           nodeName,
@@ -355,20 +109,11 @@ func NewProvider(ctx context.Context, nodeName, operatingSystem string, internal
 		pods:               make(map[string]*v1.Pod),
 		podStatus:          make(map[string]*InstanceInfo),
 		podsMutex:          sync.RWMutex{},
-		heartbeatInterval:  time.Duration(heartbeatIntervalSec) * time.Second,
-		heartbeatStop:      make(chan struct{}),
-		heartbeatCtx:       heartbeatCtx,
-		heartbeatCancel:    heartbeatCancel,
 	}
 
 	// Initialize provider
 	provider.checkRunPodAPIHealth()
 	provider.cleanupStuckTerminatingPods()
-	
-	// Register with conduit service (mandatory for DRM)
-	if err := provider.registerWithConduit(); err != nil {
-		return nil, fmt.Errorf("kubelet registration failed: %w", err)
-	}
 	
 	// Start background processes
 	go provider.startPeriodicStatusUpdates()
