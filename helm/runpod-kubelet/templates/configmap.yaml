@@ -1,20 +1,13 @@
-{{- $configMapName := "runpod-kubelet-cluster-config" -}}
-{{- $existingConfigMap := (lookup "v1" "ConfigMap" .Values.kubelet.namespace $configMapName) -}}
-{{- $clusterIdentifier := "" -}}
-{{- if .Values.cluster.identifier -}}
-  {{- $clusterIdentifier = .Values.cluster.identifier -}}
-{{- else if $existingConfigMap -}}
-  {{- $clusterIdentifier = index $existingConfigMap.data "cluster-identifier" -}}
-{{- else -}}
-  {{- $clusterIdentifier = uuidv4 -}}
+{{- if not .Values.cluster.identifier -}}
+  {{- fail "ERROR: 'cluster.identifier' is required (e.g. 'prod', 'staging'). Set it via --set cluster.identifier=prod or in values.yaml." -}}
 {{- end -}}
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: {{ $configMapName }}
+  name: runpod-kubelet-config
   namespace: {{ .Values.kubelet.namespace }}
   labels:
-    app.kubernetes.io/name: runpod-kubelet-cluster-config
+    app.kubernetes.io/name: runpod-kubelet-config
     app.kubernetes.io/component: config
 data:
-  cluster-identifier: {{ $clusterIdentifier | quote }}
+  CLUSTER_ID: {{ .Values.cluster.identifier | quote }}

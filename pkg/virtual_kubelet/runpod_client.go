@@ -731,6 +731,12 @@ func (c *Client) TerminatePod(podID string) error {
 		return fmt.Errorf("invalid pod ID: %s", podID)
 	}
 
+	// 404 means the pod is already gone — treat as success
+	if resp.StatusCode == http.StatusNotFound {
+		c.logger.Info("RunPod instance already deleted (404), treating as success", "podID", podID)
+		return nil
+	}
+
 	// DELETE endpoint returns 204 No Content on success, or 200 OK
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
 		body, _ := io.ReadAll(resp.Body)
@@ -1305,8 +1311,10 @@ func (c *Client) PrepareRunPodParameters(pod *v1.Pod, graphql bool) (map[string]
 	}
 	imageName := pod.Spec.Containers[0].Image
 
-	// Use the pod name as the RunPod name
-	runpodName := pod.Name
+	// Tag the instance name so we can identify kubelet-managed instances
+	// in the RunPod account (e.g. during orphan cleanup on restart).
+	// Format: "k8s-<clusterID>--<pod-name>" (double dash separates cluster from pod name).
+	runpodName := fmt.Sprintf("k8s-%s--%s", c.config.ClusterID, pod.Name)
 
 	// Extract ports from pod specification
 	ports := c.extractPortsFromPod(pod)

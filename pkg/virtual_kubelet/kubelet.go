@@ -1284,26 +1284,48 @@ func (p *Provider) LoadRunning() {
 		p.podsMutex.Unlock()
 	}
 
-	// Step 5: Find RunPod instances not represented in Kubernetes
+	// Step 5: Find orphaned RunPod instances (running in RunPod but no K8s pod)
+	// These are instances that kept running while the kubelet was down and their
+	// K8s pods were deleted (e.g. by KEDA scale-down or manual deletion).
+	// We only touch instances created by THIS kubelet in THIS cluster.
+	// Instance naming convention: "k8s-<clusterID>--<pod-name>"
+	ownPrefix := fmt.Sprintf("k8s-%s--", p.config.ClusterID)
+
 	existingRunPodMap := p.mapExistingRunPodInstances()
-	// Only check running pods - we don't want to create K8s pods for stopped/exited RunPod instances
 	for _, runpodInstance := range runningPods {
 		if _, exists := existingRunPodMap[runpodInstance.ID]; !exists {
-			// This RunPod instance has no representation in K8s
-			p.logger.Info("Found running RunPod instance with no Kubernetes pod",
+			// Only clean up instances that belong to this cluster
+			if !strings.HasPrefix(runpodInstance.Name, ownPrefix) {
+				p.logger.Info("Skipping RunPod instance not owned by this cluster",
+					"runpodID", runpodInstance.ID,
+					"name", runpodInstance.Name,
+					"expectedPrefix", ownPrefix)
+				continue
+			}
+
+			p.logger.Warn("Found orphaned RunPod instance with no Kubernetes pod — terminating to stop billing",
 				"runpodID", runpodInstance.ID,
 				"name", runpodInstance.Name,
-				"status", runpodInstance.CurrentStatus)
+				"status", runpodInstance.CurrentStatus,
+				"costPerHr", runpodInstance.CostPerHr)
 
-			// Create virtual pod for this RunPod instance
-			p.CreateVirtualPod(runpodInstance)
+			if err := p.runpodClient.TerminatePod(runpodInstance.ID); err != nil {
+				p.logger.Error("Failed to terminate orphaned RunPod instance",
+					"runpodID", runpodInstance.ID,
+					"name", runpodInstance.Name,
+					"error", err)
+			} else {
+				p.logger.Info("Successfully terminated orphaned RunPod instance",
+					"runpodID", runpodInstance.ID,
+					"name", runpodInstance.Name)
+			}
 		}
 	}
 
-	// Log exited pods for visibility but don't create K8s pods for them
+	// Log exited orphaned pods for visibility
 	for _, runpodInstance := range exitedPods {
 		if _, exists := existingRunPodMap[runpodInstance.ID]; !exists {
-			p.logger.Debug("Found exited RunPod instance with no Kubernetes pod (ignoring)",
+			p.logger.Debug("Found exited RunPod instance with no Kubernetes pod (already stopped, ignoring)",
 				"runpodID", runpodInstance.ID,
 				"name", runpodInstance.Name,
 				"status", runpodInstance.CurrentStatus)
@@ -1326,89 +1348,6 @@ func (p *Provider) fetchRunPodInstances() (running []RunPodInstance, exited []Ru
 	return runningPods, exitedPods, true
 }
 
-// processRunPodInstance processes a single RunPod instance
-func (p *Provider) processRunPodInstance(runpodInstance RunPodInstance, existingRunPodMap map[string]InstanceInfo) {
-	// Skip if this RunPod instance is already represented in the cluster
-	if _, exists := existingRunPodMap[runpodInstance.ID]; exists {
-		return
-	}
-
-	// Handle running instance
-	p.CreateVirtualPod(runpodInstance)
-}
-
-// CreateVirtualPod creates a virtual Pod representation of a RunPod instance
-func (p *Provider) CreateVirtualPod(runpodInstance RunPodInstance) error {
-	// Create a virtual pod for this RunPod instance
-	p.logger.Info("Creating virtual pod for existing RunPod instance",
-		"podID", runpodInstance.ID,
-		"jobName", runpodInstance.Name)
-	// Use consistent naming format for virtual pods
-	podName := fmt.Sprintf("runpod-%s", runpodInstance.ID)
-
-	// Create labels to link Pod to Job
-	podLabels := make(map[string]string)
-	podLabels[PodIDAnnotation] = runpodInstance.ID
-
-	// Create annotations for the Pod
-	podAnnotations := make(map[string]string)
-	podAnnotations[PodIDAnnotation] = runpodInstance.ID
-	podAnnotations[CostAnnotation] = fmt.Sprintf("%f", runpodInstance.CostPerHr)
-	podAnnotations["runpod.io/external"] = "true"
-
-	// Create Pod object
-	pod := &v1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:        podName,
-			Labels:      podLabels,
-			Annotations: podAnnotations,
-		},
-		Spec: v1.PodSpec{
-			Containers: []v1.Container{
-				{
-					Name:    "runpod-proxy",
-					Image:   runpodInstance.ImageName,
-					Command: []string{"/bin/sh", "-c", "echo 'This pod represents a RunPod instance'; sleep infinity"},
-				},
-			},
-			RestartPolicy: "Never",
-			NodeName:      "runpod-virtual-node",
-			NodeSelector: map[string]string{
-				"runpod.io/virtual": "true",
-			},
-			Tolerations: []v1.Toleration{
-				{
-					Key:      "runpod.io/virtual",
-					Operator: v1.TolerationOpExists,
-					Effect:   v1.TaintEffectNoSchedule,
-				},
-			},
-		},
-		Status: v1.PodStatus{
-			Phase: v1.PodRunning,
-			Conditions: []v1.PodCondition{
-				{
-					Type:               v1.PodReady,
-					Status:             v1.ConditionTrue,
-					LastTransitionTime: metav1.Now(),
-				},
-			},
-		},
-	}
-
-	//create pod in default namespace
-	_, err := p.clientset.CoreV1().Pods("default").Create(
-		context.Background(),
-		pod,
-		metav1.CreateOptions{},
-	)
-	if err != nil {
-		p.logger.Error("Failed to create virtual pod for RunPod instance",
-			"pod", pod.Name, "runpodID", runpodInstance.ID, "err", err)
-		return fmt.Errorf("failed to create virtual pod: %w", err)
-	}
-	return nil
-}
 
 // fetchRunPodInstancesByStatus fetches RunPod instances with the given status
 func (p *Provider) fetchRunPodInstancesByStatus(status string) ([]RunPodInstance, bool) {

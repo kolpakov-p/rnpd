@@ -51,7 +51,10 @@ kubelet:
   namespace: kube-system
 
 cluster:
-  identifier: ""  # If empty, a unique identifier will be generated
+  # REQUIRED: Unique cluster identifier (e.g. "prod", "staging").
+  # Used to tag RunPod instances and prevent cross-cluster interference.
+  # Kubelet will refuse to start if this is not set.
+  identifier: ""
 
 runpod:
   apiKey: ""

@@ -51,6 +51,7 @@ var (
 	healthServerAddress string
 	kubenamespace       string
 	datacenterIDs       string
+	clusterID           string
 )
 
 // Log handlers are defined in a separate file
@@ -68,6 +69,7 @@ func init() {
 	flag.StringVar(&logLevel, "log-level", "info", "log level (debug, info, warn, error)")
 	flag.StringVar(&kubenamespace, "namespace", "kube-system", "kubernetes namespace")
 	flag.StringVar(&datacenterIDs, "datacenter-ids", "", "Comma-separated list of RunPod datacenter IDs to launch pods in")
+	flag.StringVar(&clusterID, "cluster-id", "", "Unique cluster identifier (e.g. 'prod', 'staging'). Required. Used to tag RunPod instances and prevent cross-cluster interference.")
 }
 
 // LoadConfig loads configuration from a YAML file
@@ -300,10 +302,15 @@ func createAndValidateK8sClient(logger *slog.Logger) *kubernetes.Clientset {
 	return k8sClient
 }
 
-// validateEnvironment checks required environment variables
-func validateEnvironment(logger *slog.Logger) {
+// validateRequiredConfig checks required configuration before startup
+func validateRequiredConfig(logger *slog.Logger) {
 	if os.Getenv("RUNPOD_API_KEY") == "" {
 		logger.Error("RUNPOD_API_KEY environment variable is not set")
+		os.Exit(1)
+	}
+	if clusterID == "" {
+		logger.Error("--cluster-id flag is required (e.g. 'prod', 'staging'). " +
+			"It is used to tag RunPod instances and prevent cross-cluster interference.")
 		os.Exit(1)
 	}
 }
@@ -349,11 +356,12 @@ func main() {
 	// Load configuration and validate environment
 	providerConfig := loadConfiguration(logger)
 	k8sClient := createAndValidateK8sClient(logger)
-	validateEnvironment(logger)
+	validateRequiredConfig(logger)
 
 	// Create the RunPod provider
 	// Update config with command line flags
 	providerConfig.DatacenterIDs = datacenterIDs
+	providerConfig.ClusterID = clusterID
 	provider, err := runpod.NewProvider(
 		ctx,
 		nodeName,

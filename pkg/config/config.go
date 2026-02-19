@@ -23,4 +23,10 @@ type Config struct {
 
 	// DatacenterIDs is a comma-separated list of preferred datacenter IDs for pod placement
 	DatacenterIDs string
+
+	// ClusterID is a unique identifier for the Kubernetes cluster (e.g. "prod", "staging").
+	// Used to tag RunPod instances so that multiple clusters sharing
+	// the same RunPod account don't interfere with each other's instances.
+	// Required — kubelet will refuse to start without it.
+	ClusterID string
 }

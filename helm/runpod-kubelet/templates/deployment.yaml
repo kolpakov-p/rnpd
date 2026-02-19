@@ -33,6 +33,7 @@ spec:
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           args:
+            - "--cluster-id={{ .Values.cluster.identifier }}"
             - "--reconcile-interval={{ .Values.kubelet.reconcileInterval }}"
             - "--max-gpu-price={{ .Values.kubelet.maxGpuPrice }}"
             - "--health-server-address={{ .Values.kubelet.healthServerAddress }}"
@@ -52,7 +53,7 @@ spec:
             - secretRef:
                 name: {{ .Values.runpod.existingSecret | default (include "runpod-kubelet.fullname" .) }}
             - configMapRef:
-                name: runpod-kubelet-cluster-config
+                name: runpod-kubelet-config
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
       {{- with .Values.nodeSelector }}
