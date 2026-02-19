@@ -891,10 +891,22 @@ func (p *Provider) NotifyNodeStatus(ctx context.Context, cb func(*v1.Node)) {
 				// Create a node with current status
 				node := p.GetNodeStatus()
 				cb(node)
-				// The virtual-kubelet NodeController updates only the /status subresource,
-				// but the three-way merge patch it generates can clear Spec.Taints.
-				// Re-apply taints after every status update to keep the node protected.
-				// .
+			}
+		}
+	}()
+
+	// Separate goroutine to maintain taints on the virtual node.
+	// Taints cannot be set via GetNodeStatus() because the virtual-kubelet library's
+	// StrategicMergePatch clears them on every status update cycle.
+	go func() {
+		taintTicker := time.NewTicker(5 * time.Second)
+		defer taintTicker.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-taintTicker.C:
 				p.ensureTaints(ctx)
 			}
 		}
@@ -964,16 +976,12 @@ func (p *Provider) GetNodeStatus() *v1.Node {
 		Spec: v1.NodeSpec{
 			// ProviderID identifies this node to cloud controller managers (CCMs).
 			// Without it, CCMs like OpenStack CCM treat the node as a cloud instance,
-			// fail to find it in the cloud provider, and delete it — which wipes
-			// Spec.Taints on every recreation cycle.
+			// fail to find it in the cloud provider, and delete it.
 			ProviderID: "runpod://" + p.nodeName,
-			Taints: []v1.Taint{
-				{
-					Key:    "virtual-kubelet.io/provider",
-					Value:  "runpod",
-					Effect: v1.TaintEffectNoSchedule,
-				},
-			},
+			// NOTE: Taints are NOT set here. The virtual-kubelet library generates a
+			// StrategicMergePatch that includes Spec fields — if Taints are present here,
+			// the three-way merge creates a diff that gets cleared on every status update.
+			// Taints are managed by a dedicated goroutine via ensureTaints().
 		},
 		Status: v1.NodeStatus{
 			NodeInfo: v1.NodeSystemInfo{
