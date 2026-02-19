@@ -120,54 +120,16 @@ func NewProvider(ctx context.Context, nodeName, operatingSystem string, internal
 	return provider, nil
 }
 
-// isSystemPod checks if a pod is a system pod that should not be deployed to RunPod
+// isSystemPod checks if a pod should not be deployed to RunPod.
+// Only pods with an explicit toleration for virtual-kubelet.io/provider are allowed.
+// Everything else is considered a system/unintended pod and will be skipped.
 func (p *Provider) isSystemPod(pod *v1.Pod) bool {
-	// Skip pods in system namespaces
-	systemNamespaces := []string{
-		"kube-system",
-		"kube-public",
-		"kube-node-lease",
-	}
-	for _, ns := range systemNamespaces {
-		if pod.Namespace == ns {
-			return true
+	for _, t := range pod.Spec.Tolerations {
+		if t.Key == "virtual-kubelet.io/provider" {
+			return false
 		}
 	}
-
-	// Skip pods owned by DaemonSets (typically system components)
-	for _, owner := range pod.OwnerReferences {
-		if owner.Kind == "DaemonSet" {
-			return true
-		}
-	}
-
-	// Skip pods with system labels
-	if pod.Labels != nil {
-		// CSI drivers
-		if pod.Labels["app"] == "csi-cinder-nodeplugin" ||
-			pod.Labels["app.kubernetes.io/name"] == "csi-cinder-nodeplugin" {
-			return true
-		}
-		// Other CSI drivers pattern
-		if strings.HasPrefix(pod.Labels["app"], "csi-") ||
-			strings.HasPrefix(pod.Labels["app.kubernetes.io/name"], "csi-") {
-			return true
-		}
-		// kube-proxy
-		if pod.Labels["component"] == "kube-proxy" ||
-			pod.Labels["k8s-app"] == "kube-proxy" {
-			return true
-		}
-		// CNI plugins
-		if pod.Labels["app"] == "calico-node" ||
-			pod.Labels["app"] == "flannel" ||
-			pod.Labels["k8s-app"] == "calico-node" ||
-			pod.Labels["k8s-app"] == "flannel" {
-			return true
-		}
-	}
-
-	return false
+	return true
 }
 
 // Implementation of required interface methods to fulfill the PodLifecycleHandler interface
