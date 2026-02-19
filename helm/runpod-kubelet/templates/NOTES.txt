@@ -1,32 +1,68 @@
-1. Get the application status by running these commands:
-   kubectl --namespace {{ .Values.kubelet.namespace }} get pods -l "app.kubernetes.io/name={{ include "runpod-kubelet.name" . }},app.kubernetes.io/instance={{ .Release.Name }}"
+RunPod Virtual Kubelet has been deployed!
 
-2. Check the virtual node status:
-   kubectl get nodes
+Cluster identifier: {{ .Values.cluster.identifier }}
 
-3. Monitor the kubelet logs:
-   kubectl --namespace {{ .Values.kubelet.namespace }} logs -l "app.kubernetes.io/name={{ include "runpod-kubelet.name" . }},app.kubernetes.io/instance={{ .Release.Name }}" -f
+1. Check the virtual node:
+   kubectl get node virtual-runpod
+
+2. Check the kubelet pod:
+   kubectl -n {{ .Values.kubelet.namespace }} get pods -l "app.kubernetes.io/name={{ include "runpod-kubelet.name" . }}"
+
+3. View kubelet logs:
+   kubectl -n {{ .Values.kubelet.namespace }} logs -l "app.kubernetes.io/name={{ include "runpod-kubelet.name" . }}" -f
 
 {{- if not .Values.runpod.existingSecret }}
 {{- if not .Values.runpod.apiKey }}
 
-WARNING: You have not set a RunPod API key!
-
-Please set the RunPod API key by either:
-1. Setting .Values.runpod.apiKey in your values file
-2. Creating a secret manually and setting .Values.runpod.existingSecret
-3. Upgrading the release with --set runpod.apiKey=YOUR_API_KEY
-
-The kubelet will not function properly without a valid RunPod API key.
+WARNING: RunPod API key is not set! The kubelet will not function.
+Set it via:
+  --set runpod.apiKey=YOUR_KEY
+  or create a secret and set runpod.existingSecret=SECRET_NAME
 {{- end }}
 {{- end }}
 
-To schedule pods on the virtual RunPod node, use:
-  nodeSelector:
-    kubernetes.io/hostname: runpod-node
+== Scheduling pods on RunPod ==
 
-Or use tolerations for GPU workloads:
-  tolerations:
-  - key: nvidia.com/gpu
-    operator: Exists
-    effect: NoSchedule
+To deploy a pod to RunPod, your Deployment/Pod MUST have BOTH:
+
+1. nodeSelector — to target the virtual node:
+
+   spec:
+     nodeSelector:
+       kubernetes.io/hostname: virtual-runpod
+
+2. toleration — to bypass the NoSchedule taint:
+
+   spec:
+     tolerations:
+       - key: "virtual-kubelet.io/provider"
+         operator: "Equal"
+         value: "runpod"
+         effect: "NoSchedule"
+
+Without the toleration, the pod will be rejected by:
+  - Kyverno ClusterPolicy (if installed) — adds anti-affinity to prevent scheduling
+  - The kubelet's isSystemPod() check — skips pods without this toleration
+
+Full example:
+
+  apiVersion: apps/v1
+  kind: Deployment
+  metadata:
+    name: my-gpu-workload
+  spec:
+    template:
+      spec:
+        nodeSelector:
+          kubernetes.io/hostname: virtual-runpod
+        tolerations:
+          - key: "virtual-kubelet.io/provider"
+            operator: "Equal"
+            value: "runpod"
+            effect: "NoSchedule"
+        containers:
+          - name: worker
+            image: my-image:latest
+            resources:
+              limits:
+                nvidia.com/gpu: "1"
