@@ -978,10 +978,13 @@ func (p *Provider) GetNodeStatus() *v1.Node {
 			// Without it, CCMs like OpenStack CCM treat the node as a cloud instance,
 			// fail to find it in the cloud provider, and delete it.
 			ProviderID: "runpod://" + p.nodeName,
-			// NOTE: Taints are NOT set here. The virtual-kubelet library generates a
-			// StrategicMergePatch that includes Spec fields — if Taints are present here,
-			// the three-way merge creates a diff that gets cleared on every status update.
-			// Taints are managed by a dedicated goroutine via ensureTaints().
+			Taints: []v1.Taint{
+				{
+					Key:    "virtual-kubelet.io/provider",
+					Value:  "runpod",
+					Effect: v1.TaintEffectNoSchedule,
+				},
+			},
 		},
 		Status: v1.NodeStatus{
 			NodeInfo: v1.NodeSystemInfo{
