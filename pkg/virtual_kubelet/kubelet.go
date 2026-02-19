@@ -891,11 +891,61 @@ func (p *Provider) NotifyNodeStatus(ctx context.Context, cb func(*v1.Node)) {
 				// Create a node with current status
 				node := p.GetNodeStatus()
 				cb(node)
+				// The virtual-kubelet NodeController updates only the /status subresource,
+				// but the three-way merge patch it generates can clear Spec.Taints.
+				// Re-apply taints after every status update to keep the node protected.
+				p.ensureTaints(ctx)
 			}
 		}
 	}()
 }
 
+// ensureTaints checks the virtual node and re-applies required taints if missing.
+func (p *Provider) ensureTaints(ctx context.Context) {
+	requiredTaints := []v1.Taint{
+		{
+			Key:    "virtual-kubelet.io/provider",
+			Value:  "runpod",
+			Effect: v1.TaintEffectNoSchedule,
+		},
+	}
+
+	currentNode, err := p.clientset.CoreV1().Nodes().Get(ctx, p.nodeName, metav1.GetOptions{})
+	if err != nil {
+		p.logger.Warn("ensureTaints: failed to get node", "error", err)
+		return
+	}
+
+	// Check if all required taints are present
+	for _, req := range requiredTaints {
+		found := false
+		for _, existing := range currentNode.Spec.Taints {
+			if existing.Key == req.Key && existing.Value == req.Value && existing.Effect == req.Effect {
+				found = true
+				break
+			}
+		}
+		if found {
+			continue
+		}
+
+		// Missing taint — patch it in
+		merged := append(currentNode.Spec.Taints, req)
+		taintsJSON, err := json.Marshal(merged)
+		if err != nil {
+			p.logger.Warn("ensureTaints: failed to marshal taints", "error", err)
+			return
+		}
+		patch := fmt.Sprintf(`{"spec":{"taints":%s}}`, taintsJSON)
+		_, err = p.clientset.CoreV1().Nodes().Patch(ctx, p.nodeName, types.MergePatchType, []byte(patch), metav1.PatchOptions{})
+		if err != nil {
+			p.logger.Warn("ensureTaints: failed to patch node taints", "error", err)
+			return
+		}
+		p.logger.Info("ensureTaints: re-applied missing taints to node", "node", p.nodeName)
+		return
+	}
+}
 
 // Helper to get current node status
 func (p *Provider) GetNodeStatus() *v1.Node {
