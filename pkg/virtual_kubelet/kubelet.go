@@ -894,6 +894,7 @@ func (p *Provider) NotifyNodeStatus(ctx context.Context, cb func(*v1.Node)) {
 				// The virtual-kubelet NodeController updates only the /status subresource,
 				// but the three-way merge patch it generates can clear Spec.Taints.
 				// Re-apply taints after every status update to keep the node protected.
+				// .
 				p.ensureTaints(ctx)
 			}
 		}
