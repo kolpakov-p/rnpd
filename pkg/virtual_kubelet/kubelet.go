@@ -930,6 +930,7 @@ func (p *Provider) ensureTaints(ctx context.Context) {
 	}
 
 	// Check if all required taints are present
+	allPresent := true
 	for _, req := range requiredTaints {
 		found := false
 		for _, existing := range currentNode.Spec.Taints {
@@ -938,26 +939,30 @@ func (p *Provider) ensureTaints(ctx context.Context) {
 				break
 			}
 		}
-		if found {
-			continue
+		if !found {
+			allPresent = false
+			break
 		}
+	}
 
-		// Missing taint — patch it in
-		merged := append(currentNode.Spec.Taints, req)
-		taintsJSON, err := json.Marshal(merged)
-		if err != nil {
-			p.logger.Warn("ensureTaints: failed to marshal taints", "error", err)
-			return
-		}
-		patch := fmt.Sprintf(`{"spec":{"taints":%s}}`, taintsJSON)
-		_, err = p.clientset.CoreV1().Nodes().Patch(ctx, p.nodeName, types.MergePatchType, []byte(patch), metav1.PatchOptions{})
-		if err != nil {
-			p.logger.Warn("ensureTaints: failed to patch node taints", "error", err)
-			return
-		}
-		p.logger.Info("ensureTaints: re-applied missing taints to node", "node", p.nodeName)
+	if allPresent {
 		return
 	}
+
+	// Use StrategicMergePatch — it merges the taints array by key+effect,
+	// so we only add our taints without replacing existing ones (e.g. from kube-controller-manager).
+	taintsJSON, err := json.Marshal(requiredTaints)
+	if err != nil {
+		p.logger.Warn("ensureTaints: failed to marshal taints", "error", err)
+		return
+	}
+	patch := fmt.Sprintf(`{"spec":{"taints":%s}}`, taintsJSON)
+	_, err = p.clientset.CoreV1().Nodes().Patch(ctx, p.nodeName, types.StrategicMergePatchType, []byte(patch), metav1.PatchOptions{})
+	if err != nil {
+		p.logger.Warn("ensureTaints: failed to patch node taints", "error", err)
+		return
+	}
+	p.logger.Info("ensureTaints: re-applied missing taints to node", "node", p.nodeName)
 }
 
 // Helper to get current node status
