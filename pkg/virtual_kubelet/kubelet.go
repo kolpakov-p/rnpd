@@ -875,6 +875,7 @@ func (p *Provider) GetNodeStatus() *v1.Node {
 			// ProviderID identifies this node to cloud controller managers (CCMs).
 			// Without it, CCMs like OpenStack CCM treat the node as a cloud instance,
 			// fail to find it in the cloud provider, and delete it.
+			// .
 			ProviderID: "runpod://" + p.nodeName,
 			Taints: []v1.Taint{
 				{
