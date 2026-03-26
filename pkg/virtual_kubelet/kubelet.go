@@ -66,6 +66,7 @@ func (p *Provider) startPeriodicCleanup() {
 		case <-ticker.C:
 			p.cleanupDeletedPods()
 			p.cleanupStuckTerminatingPods()
+			p.cleanupOrphanedRunPodInstances()
 		}
 	}
 }
@@ -1444,14 +1445,23 @@ func (p *Provider) LoadRunning() {
 		p.podsMutex.Unlock()
 	}
 
-	// Step 5: Find orphaned RunPod instances (running in RunPod but no K8s pod)
-	// These are instances that kept running while the kubelet was down and their
-	// K8s pods were deleted (e.g. by KEDA scale-down or manual deletion).
-	// We only touch instances created by THIS kubelet in THIS cluster.
-	// Instance naming convention: "k8s-<clusterID>--<pod-name>"
-	ownPrefix := fmt.Sprintf("k8s-%s--", p.config.ClusterID)
+	// Step 5: Clean up orphaned RunPod instances
+	p.cleanupOrphanedRunPodInstances()
+}
 
+// cleanupOrphanedRunPodInstances finds RunPod instances that have no matching K8s pod
+// and terminates them. This prevents billing for instances that were left behind
+// (e.g., kubelet restart, KEDA scale-down while kubelet was down, duplicate creation).
+// Safe to call periodically — only touches instances owned by this cluster.
+func (p *Provider) cleanupOrphanedRunPodInstances() {
+	runningPods, exitedPods, ok := p.fetchRunPodInstances()
+	if !ok {
+		return
+	}
+
+	ownPrefix := fmt.Sprintf("k8s-%s--", p.config.ClusterID)
 	existingRunPodMap := p.mapExistingRunPodInstances()
+
 	for _, runpodInstance := range runningPods {
 		if _, exists := existingRunPodMap[runpodInstance.ID]; !exists {
 			// Only clean up instances that belong to this cluster
@@ -1469,7 +1479,7 @@ func (p *Provider) LoadRunning() {
 				"status", runpodInstance.CurrentStatus,
 				"costPerHr", runpodInstance.CostPerHr)
 
-			if err := p.terminateRunPodInstance(runpodInstance.ID, runpodInstance.Name, "", "LoadRunning: orphaned RunPod instance has no matching K8s pod"); err != nil {
+			if err := p.terminateRunPodInstance(runpodInstance.ID, runpodInstance.Name, "", "cleanupOrphaned: RunPod instance has no matching K8s pod"); err != nil {
 				p.logger.Error("Failed to terminate orphaned RunPod instance",
 					"runpodID", runpodInstance.ID,
 					"name", runpodInstance.Name,
@@ -1493,13 +1503,20 @@ func (p *Provider) LoadRunning() {
 	}
 }
 
-// fetchRunPodInstances fetches both running and exited pods from the RunPod API
+// fetchRunPodInstances fetches running, starting, and exited pods from the RunPod API.
+// STARTING pods are included in the "running" list to prevent duplicate creation on kubelet restart.
 func (p *Provider) fetchRunPodInstances() (running []RunPodInstance, exited []RunPodInstance, ok bool) {
 	// Make a request to the RunPod API to get all running pods
 	runningPods, ok := p.fetchRunPodInstancesByStatus("RUNNING")
 	if !ok {
 		return nil, nil, false
 	}
+
+	// Also fetch STARTING pods — these are instances that exist but haven't reached RUNNING yet.
+	// Without this, a kubelet restart while a pod is STARTING would create a duplicate instance.
+	startingPods, _ := p.fetchRunPodInstancesByStatus("STARTING")
+	// Merge starting into running for reconciliation purposes
+	runningPods = append(runningPods, startingPods...)
 
 	// Also check for exited pods
 	exitedPods, _ := p.fetchRunPodInstancesByStatus("EXITED")
