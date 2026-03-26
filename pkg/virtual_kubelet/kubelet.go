@@ -395,7 +395,7 @@ func (p *Provider) DeletePod(ctx context.Context, pod *v1.Pod) error {
 		p.deletedPodsMutex.Unlock()
 
 		// Attempt to terminate RunPod instance
-		if err := p.runpodClient.TerminatePod(podID); err != nil {
+		if err := p.terminateRunPodInstance(podID, pod.Name, pod.Namespace, "DeletePod: K8s requested pod deletion (KEDA scale-down or manual)"); err != nil {
 			p.logger.Error("Failed to terminate RunPod instance",
 				"pod", pod.Name,
 				"namespace", pod.Namespace,
@@ -984,7 +984,7 @@ func (p *Provider) cleanupDeletedPods() {
 				"name", name,
 				"runpodID", runpodID)
 
-			if err := p.runpodClient.TerminatePod(runpodID); err != nil {
+			if err := p.terminateRunPodInstance(runpodID, name, namespace, "cleanupDeletedPods: pod gone from K8s, terminating RunPod instance"); err != nil {
 				p.logger.Error("Failed to terminate RunPod instance during cleanup",
 					"runpodID", runpodID, "err", err)
 			}
@@ -1027,7 +1027,7 @@ func (p *Provider) cleanupStuckTerminatingPods() {
 					"namespace", pod.Namespace,
 					"deletionTimestamp", pod.DeletionTimestamp)
 
-				err = p.ForceDeletePod(pod.Namespace, pod.Name)
+				err = p.forceDeleteK8sPod(pod.Namespace, pod.Name, "cleanupStuckTerminating: pod has no RunPod ID, never deployed")
 				if err != nil {
 					p.logger.Error("Failed to force delete terminating pod without RunPod ID",
 						"pod", pod.Name,
@@ -1058,7 +1058,7 @@ func (p *Provider) cleanupStuckTerminatingPods() {
 						"runpodID", podID,
 						"terminatingDuration", terminatingDuration)
 
-					err = p.ForceDeletePod(pod.Namespace, pod.Name)
+					err = p.forceDeleteK8sPod(pod.Namespace, pod.Name, fmt.Sprintf("cleanupStuckTerminating: terminating >10min with status check errors, runpodID=%s", podID))
 					if err != nil {
 						p.logger.Error("Failed to force delete terminating pod with status check errors",
 							"pod", pod.Name,
@@ -1081,7 +1081,7 @@ func (p *Provider) cleanupStuckTerminatingPods() {
 					"runpodStatus", status)
 
 				// Force delete the pod
-				err = p.ForceDeletePod(pod.Namespace, pod.Name)
+				err = p.forceDeleteK8sPod(pod.Namespace, pod.Name, fmt.Sprintf("cleanupStuckTerminating: RunPod instance gone/exited/terminated (status=%s), runpodID=%s", status, podID))
 				if err != nil {
 					p.logger.Error("Failed to force delete terminating pod",
 						"pod", pod.Name,
@@ -1107,7 +1107,7 @@ func (p *Provider) cleanupStuckTerminatingPods() {
 						"terminatingDuration", terminatingDuration)
 
 					// Try to terminate the RunPod instance again
-					if err := p.runpodClient.TerminatePod(podID); err != nil {
+					if err := p.terminateRunPodInstance(podID, pod.Name, pod.Namespace, fmt.Sprintf("cleanupStuckTerminating: re-terminate after >5min terminating, RunPod still alive (status=%s)", status)); err != nil {
 						p.logger.Error("Failed to re-terminate RunPod instance",
 							"pod", pod.Name,
 							"namespace", pod.Namespace,
@@ -1124,7 +1124,7 @@ func (p *Provider) cleanupStuckTerminatingPods() {
 							"runpodStatus", status,
 							"terminatingDuration", terminatingDuration)
 
-						err = p.ForceDeletePod(pod.Namespace, pod.Name)
+						err = p.forceDeleteK8sPod(pod.Namespace, pod.Name, fmt.Sprintf("cleanupStuckTerminating: force delete after >15min despite remote instance (status=%s, runpodID=%s)", status, podID))
 						if err != nil {
 							p.logger.Error("Failed to force delete long-terminating pod",
 								"pod", pod.Name,
@@ -1489,6 +1489,25 @@ func (p *Provider) handleMissingRunPodInstance(pod *v1.Pod, podKey string, runpo
 			"namespace", pod.Namespace,
 			"error", err)
 	}
+}
+
+// terminateRunPodInstance wraps TerminatePod with a reason for debugging pod lifecycle.
+func (p *Provider) terminateRunPodInstance(podID, podName, namespace, reason string) error {
+	p.logger.Warn(">>> TERMINATING RunPod instance",
+		"reason", reason,
+		"pod", podName,
+		"namespace", namespace,
+		"runpodID", podID)
+	return p.runpodClient.TerminatePod(podID)
+}
+
+// forceDeleteK8sPod wraps ForceDeletePod with a reason for debugging pod lifecycle.
+func (p *Provider) forceDeleteK8sPod(namespace, name, reason string) error {
+	p.logger.Warn(">>> FORCE DELETING K8s pod",
+		"reason", reason,
+		"pod", name,
+		"namespace", namespace)
+	return p.ForceDeletePod(namespace, name)
 }
 
 // ForceDeletePod forcefully removes a pod from the Kubernetes API
