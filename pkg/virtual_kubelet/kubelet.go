@@ -54,7 +54,14 @@ func (p *Provider) startPeriodicStatusUpdates() {
 		case <-ticker.C:
 			p.updateAllPodStatuses()
 			p.checkRunPodAPIHealth()
-			p.syncEndpointSlices()
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						p.logger.Error("Panic in syncEndpointSlices recovered", "panic", r)
+					}
+				}()
+				p.syncEndpointSlices()
+			}()
 		}
 	}
 }
@@ -2052,6 +2059,13 @@ func (p *Provider) syncEndpointSlices() {
 			addrType := discoveryv1.AddressTypeIPv4
 			isController := true
 
+			// Построим маппинг internalPort → Service port name.
+			// kube-proxy матчит EndpointSlice порты с Service портами по имени.
+			svcPortNames := make(map[string]string) // "8075" → "http"
+			for _, sp := range svc.Spec.Ports {
+				svcPortNames[fmt.Sprintf("%d", sp.TargetPort.IntValue())] = sp.Name
+			}
+
 			// Track which EndpointSlice names we create/update so we can clean up stale ones.
 			activeSliceNames := make(map[string]bool)
 
@@ -2106,7 +2120,9 @@ func (p *Provider) syncEndpointSlices() {
 						addrs = append(addrs, resolved[0])
 						proto := v1.ProtocolTCP
 						portNum := int32(443)
-						portName := "https-" + internalPortStr
+						// Имя порта должно совпадать с именем в Service, иначе kube-proxy проигнорирует endpoint.
+						// Если Service порт безымянный — оставляем пустым (K8s допускает для единственного порта).
+						portName := svcPortNames[internalPortStr]
 						podPorts = append(podPorts, discoveryv1.EndpointPort{
 							Name: &portName, Protocol: &proto, Port: &portNum,
 						})
@@ -2119,7 +2135,9 @@ func (p *Provider) syncEndpointSlices() {
 						addrs = append(addrs, podInfo.PublicIP)
 						proto := v1.ProtocolTCP
 						portNum := int32(externalPort)
-						portName := "tcp-" + internalPortStr
+						// Имя порта должно совпадать с именем в Service, иначе kube-proxy проигнорирует endpoint.
+						// Если Service порт безымянный — оставляем пустым (K8s допускает для единственного порта).
+						portName := svcPortNames[internalPortStr]
 						podPorts = append(podPorts, discoveryv1.EndpointPort{
 							Name: &portName, Protocol: &proto, Port: &portNum,
 						})
