@@ -731,6 +731,10 @@ func (p *Provider) updateAllPodStatuses() {
 		p.podsMutex.Lock()
 		podInfo.PublicIP = detailedStatus.PublicIP
 		podInfo.ExternalPortMappings = detailedStatus.PortMappings
+		// Ленивая инициализация RequestedPorts — если LoadRunning не заполнил.
+		if len(podInfo.RequestedPorts) == 0 && pod != nil {
+			podInfo.RequestedPorts = p.runpodClient.GetRequestedPorts(pod)
+		}
 		// Track when pod first enters RUNNING (for initialDelaySeconds)
 		if string(status) == string(PodRunning) && podInfo.RunningStartTime.IsZero() {
 			podInfo.RunningStartTime = time.Now()
@@ -1414,13 +1418,14 @@ func (p *Provider) LoadRunning() {
 
 				// Update pod status in cache
 				p.podStatus[podKey] = &InstanceInfo{
-					ID:           podID,
-					PodName:      pod.Name,
-					Namespace:    pod.Namespace,
-					Status:       podStatus,
-					CostPerHr:    instance.CostPerHr,
-					CreationTime: pod.CreationTimestamp.Time,
-					PortsExposed: false,
+					ID:             podID,
+					PodName:        pod.Name,
+					Namespace:      pod.Namespace,
+					Status:         podStatus,
+					CostPerHr:      instance.CostPerHr,
+					CreationTime:   pod.CreationTimestamp.Time,
+					RequestedPorts: p.runpodClient.GetRequestedPorts(&pod),
+					PortsExposed:   false,
 				}
 			} else {
 				// Pod has ID but instance not found in RunPod - use shared handler
@@ -1435,11 +1440,12 @@ func (p *Provider) LoadRunning() {
 
 			// Mark as pending deployment
 			p.podStatus[podKey] = &InstanceInfo{
-				PodName:      pod.Name,
-				Namespace:    pod.Namespace,
-				Status:       string(PodStarting),
-				CreationTime: pod.CreationTimestamp.Time,
-				PortsExposed: false,
+				PodName:        pod.Name,
+				Namespace:      pod.Namespace,
+				Status:         string(PodStarting),
+				CreationTime:   pod.CreationTimestamp.Time,
+				RequestedPorts: p.runpodClient.GetRequestedPorts(&pod),
+				PortsExposed:   false,
 			}
 
 			// Don't try to deploy here - let the existing periodic processor handle it
