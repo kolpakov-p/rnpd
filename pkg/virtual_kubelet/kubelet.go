@@ -368,6 +368,98 @@ func (p *Provider) checkPortsExposed(portMappings map[string]int, requestedPorts
 	return true
 }
 
+// getReadinessProbe extracts the httpGet readiness probe from the first container in pod spec.
+// Returns nil if no httpGet readiness probe is configured.
+func getReadinessProbe(pod *v1.Pod) *v1.Probe {
+	if pod == nil || len(pod.Spec.Containers) == 0 {
+		return nil
+	}
+	probe := pod.Spec.Containers[0].ReadinessProbe
+	if probe == nil || probe.HTTPGet == nil {
+		return nil
+	}
+	return probe
+}
+
+// buildReadinessProbeURL constructs the URL to check for readiness.
+// Supports both TCP ports (via publicIP:externalPort) and HTTP ports (via RunPod proxy).
+func buildReadinessProbeURL(podID string, probe *v1.Probe, requestedPorts []string, publicIP string, portMappings map[string]int) string {
+	port := probe.HTTPGet.Port.IntValue()
+	path := probe.HTTPGet.Path
+	portStr := fmt.Sprintf("%d", port)
+
+	// Check if this port is declared as HTTP in the pod annotations
+	isHTTPPort := false
+	for _, rp := range requestedPorts {
+		if rp == portStr+"/http" {
+			isHTTPPort = true
+			break
+		}
+	}
+
+	if isHTTPPort {
+		// Use RunPod proxy URL for HTTP ports
+		return fmt.Sprintf("https://%s-%d.proxy.runpod.net%s", podID, port, path)
+	}
+
+	// TCP port — use publicIP + external port mapping
+	if publicIP != "" && portMappings != nil {
+		if externalPort, ok := portMappings[portStr]; ok {
+			return fmt.Sprintf("http://%s:%d%s", publicIP, externalPort, path)
+		}
+	}
+
+	return "" // Can't reach the pod
+}
+
+// performReadinessCheck does an HTTP GET to the readiness probe URL.
+// Returns true if the response status is 200-399 (same as K8s convention).
+func (p *Provider) performReadinessCheck(url string, timeoutSeconds int) bool {
+	if url == "" {
+		return false
+	}
+
+	timeout := 5 * time.Second
+	if timeoutSeconds > 0 {
+		timeout = time.Duration(timeoutSeconds) * time.Second
+	}
+
+	client := &http.Client{Timeout: timeout}
+	resp, err := client.Get(url)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	// K8s readiness probe convention: 200-399 = success
+	return resp.StatusCode >= 200 && resp.StatusCode < 400
+}
+
+// isPodReadyForProbe checks if enough time has passed since the pod started running
+// to begin readiness probing (respects initialDelaySeconds).
+func isPodReadyForProbe(podInfo *InstanceInfo, probe *v1.Probe) bool {
+	if podInfo.RunningStartTime.IsZero() {
+		return false
+	}
+	delay := time.Duration(probe.InitialDelaySeconds) * time.Second
+	return time.Since(podInfo.RunningStartTime) >= delay
+}
+
+// computeIsReady determines the Ready state for a pod, taking readiness probe into account.
+// If no probe is configured, Ready = portsExposed (existing behavior).
+func (p *Provider) computeIsReady(pod *v1.Pod, podInfo *InstanceInfo) bool {
+	if podInfo.Status != string(PodRunning) || !podInfo.PortsExposed {
+		return false
+	}
+
+	probe := getReadinessProbe(pod)
+	if probe == nil {
+		// No readiness probe — ports exposed means ready (existing behavior)
+		return true
+	}
+
+	return podInfo.ReadinessProbeReady
+}
+
 // Resize implements the api.AttachIO interface for terminal resizing
 // Note: RunPod.io doesn't support terminal access, so this is a no-op implementation
 func (p *Provider) Resize(ctx context.Context, namespace, podName, containerName string, size api.TermSize) error {
@@ -456,7 +548,8 @@ func (p *Provider) GetPodStatus(ctx context.Context, namespace, name string) (*v
 	}
 
 	// Translate RunPod status to Kubernetes PodStatus
-	return p.translateRunPodStatus(podInfo.Status, podInfo.StatusMessage, hasExposedPorts), nil
+	isReady := p.computeIsReady(pod, podInfo)
+	return p.translateRunPodStatus(podInfo.Status, podInfo.StatusMessage, hasExposedPorts, isReady), nil
 }
 
 // GetPods retrieves a list of all pods running on the provider
@@ -630,6 +723,16 @@ func (p *Provider) updateAllPodStatuses() {
 		// Check if the requested ports are exposed
 		hasExposedPorts := p.checkPortsExposed(detailedStatus.PortMappings, podInfo.RequestedPorts)
 
+		// Update network info for readiness probes
+		p.podsMutex.Lock()
+		podInfo.PublicIP = detailedStatus.PublicIP
+		podInfo.ExternalPortMappings = detailedStatus.PortMappings
+		// Track when pod first enters RUNNING (for initialDelaySeconds)
+		if string(status) == string(PodRunning) && podInfo.RunningStartTime.IsZero() {
+			podInfo.RunningStartTime = time.Now()
+		}
+		p.podsMutex.Unlock()
+
 		// Update pod info if status changed OR port exposure changed
 		statusChanged := string(status) != podInfo.Status
 		portsExposureChanged := hasExposedPorts != podInfo.PortsExposed
@@ -644,7 +747,8 @@ func (p *Provider) updateAllPodStatuses() {
 			p.podsMutex.Unlock()
 
 			// Create the new Kubernetes PodStatus with port exposure information
-			newStatus := p.translateRunPodStatus(string(status), podInfo.StatusMessage, hasExposedPorts)
+			isReady := p.computeIsReady(pod, podInfo)
+			newStatus := p.translateRunPodStatus(string(status), podInfo.StatusMessage, hasExposedPorts, isReady)
 
 			// Keep existing container state if possible
 			if len(pod.Status.ContainerStatuses) > 0 && newStatus != nil {
@@ -734,6 +838,62 @@ func (p *Provider) updateAllPodStatuses() {
 				}
 			}
 		}
+
+		// Readiness probe check — runs independently of status/port changes
+		probe := getReadinessProbe(pod)
+		if probe != nil && podInfo.Status == string(PodRunning) && podInfo.PortsExposed && !podInfo.ReadinessProbeReady {
+			if isPodReadyForProbe(podInfo, probe) {
+				// Check if enough time passed since last check (respect periodSeconds)
+				period := time.Duration(probe.PeriodSeconds) * time.Second
+				if period == 0 {
+					period = 10 * time.Second // K8s default
+				}
+				if time.Since(podInfo.ReadinessLastCheck) >= period {
+					probeURL := buildReadinessProbeURL(podID, probe, podInfo.RequestedPorts, podInfo.PublicIP, podInfo.ExternalPortMappings)
+					timeoutSeconds := int(probe.TimeoutSeconds)
+					if timeoutSeconds == 0 {
+						timeoutSeconds = 1 // K8s default
+					}
+					success := p.performReadinessCheck(probeURL, timeoutSeconds)
+
+					p.podsMutex.Lock()
+					podInfo.ReadinessLastCheck = time.Now()
+					if success {
+						podInfo.ReadinessProbeReady = true
+						podInfo.ReadinessFailCount = 0
+						p.logger.Info("Readiness probe passed",
+							"pod", pod.Name,
+							"namespace", pod.Namespace,
+							"url", probeURL)
+					} else {
+						podInfo.ReadinessFailCount++
+						failureThreshold := int(probe.FailureThreshold)
+						if failureThreshold == 0 {
+							failureThreshold = 3 // K8s default
+						}
+						p.logger.Debug("Readiness probe failed",
+							"pod", pod.Name,
+							"namespace", pod.Namespace,
+							"url", probeURL,
+							"failCount", podInfo.ReadinessFailCount,
+							"threshold", failureThreshold)
+					}
+					p.podsMutex.Unlock()
+
+					// If readiness state just changed to true, notify K8s
+					if success {
+						isReady := true
+						newStatus := p.translateRunPodStatus(podInfo.Status, podInfo.StatusMessage, podInfo.PortsExposed, isReady)
+						if err := p.updatePodStatusInK8s(pod, newStatus); err != nil {
+							p.logger.Error("Failed to update readiness status in K8s",
+								"pod", pod.Name,
+								"namespace", pod.Namespace,
+								"error", err)
+						}
+					}
+				}
+			}
+		}
 	}
 }
 
@@ -795,7 +955,7 @@ func (p *Provider) handlePodCompletion(pod *v1.Pod, podInfo *InstanceInfo) {
 	isSuccess := IsSuccessfulCompletion(status)
 
 	// Update pod status - for exited pods, port exposure is not relevant
-	podStatus := p.translateRunPodStatus(string(PodExited), exitMessage, true)
+	podStatus := p.translateRunPodStatus(string(PodExited), exitMessage, true, false)
 	if isSuccess {
 		podStatus.Phase = v1.PodSucceeded
 		if len(podStatus.ContainerStatuses) > 0 && podStatus.ContainerStatuses[0].State.Terminated != nil {
@@ -1292,9 +1452,6 @@ func (p *Provider) LoadRunning() {
 	ownPrefix := fmt.Sprintf("k8s-%s--", p.config.ClusterID)
 
 	existingRunPodMap := p.mapExistingRunPodInstances()
-	// TODO: Orphan cleanup temporarily disabled — suspected race condition where
-	// newly created RunPod instances get terminated before their K8s pod receives
-	// the PodIDAnnotation. Re-enable after adding grace period or STARTING status check.
 	for _, runpodInstance := range runningPods {
 		if _, exists := existingRunPodMap[runpodInstance.ID]; !exists {
 			// Only clean up instances that belong to this cluster
@@ -1306,22 +1463,22 @@ func (p *Provider) LoadRunning() {
 				continue
 			}
 
-			p.logger.Warn("Found orphaned RunPod instance with no Kubernetes pod — skipping termination (cleanup disabled)",
+			p.logger.Warn("Found orphaned RunPod instance with no Kubernetes pod — terminating to stop billing",
 				"runpodID", runpodInstance.ID,
 				"name", runpodInstance.Name,
 				"status", runpodInstance.CurrentStatus,
 				"costPerHr", runpodInstance.CostPerHr)
 
-			// if err := p.runpodClient.TerminatePod(runpodInstance.ID); err != nil {
-			// 	p.logger.Error("Failed to terminate orphaned RunPod instance",
-			// 		"runpodID", runpodInstance.ID,
-			// 		"name", runpodInstance.Name,
-			// 		"error", err)
-			// } else {
-			// 	p.logger.Info("Successfully terminated orphaned RunPod instance",
-			// 		"runpodID", runpodInstance.ID,
-			// 		"name", runpodInstance.Name)
-			// }
+			if err := p.terminateRunPodInstance(runpodInstance.ID, runpodInstance.Name, "", "LoadRunning: orphaned RunPod instance has no matching K8s pod"); err != nil {
+				p.logger.Error("Failed to terminate orphaned RunPod instance",
+					"runpodID", runpodInstance.ID,
+					"name", runpodInstance.Name,
+					"error", err)
+			} else {
+				p.logger.Info("Successfully terminated orphaned RunPod instance",
+					"runpodID", runpodInstance.ID,
+					"name", runpodInstance.Name)
+			}
 		}
 	}
 
@@ -1481,7 +1638,7 @@ func (p *Provider) handleMissingRunPodInstance(pod *v1.Pod, podKey string, runpo
 	}
 
 	// Update pod status to Failed to prevent redeployment - port exposure is not relevant for failed pods
-	failedStatus := p.translateRunPodStatus(string(PodNotFound), "RunPod instance was deleted", true)
+	failedStatus := p.translateRunPodStatus(string(PodNotFound), "RunPod instance was deleted", true, false)
 	err = p.updatePodStatusInK8s(currentPod, failedStatus)
 	if err != nil {
 		p.logger.Error("Failed to update pod status to Failed",
@@ -1582,8 +1739,10 @@ func (p *Provider) updatePodStatusInK8s(pod *v1.Pod, newStatus *v1.PodStatus) er
 	return nil
 }
 
-// translateRunPodStatus converts a RunPod status string to a Kubernetes PodStatus
-func (p *Provider) translateRunPodStatus(runpodStatus string, statusMessage string, hasExposedPorts bool) *v1.PodStatus {
+// translateRunPodStatus converts a RunPod status string to a Kubernetes PodStatus.
+// isReady controls the Ready condition: for pods with readinessProbe it reflects probe state,
+// for pods without it reflects port exposure state.
+func (p *Provider) translateRunPodStatus(runpodStatus string, statusMessage string, hasExposedPorts bool, isReady bool) *v1.PodStatus {
 	now := metav1.NewTime(time.Now())
 	startTime := metav1.NewTime(now.Add(-1 * time.Hour)) // Default start time
 
@@ -1604,14 +1763,14 @@ func (p *Provider) translateRunPodStatus(runpodStatus string, statusMessage stri
 	switch runpodStatus {
 	case string(PodRunning):
 		if hasExposedPorts {
-			// Container is truly running and ready
+			// Container is running; readiness depends on probe (or port exposure if no probe)
 			phase = v1.PodRunning
 			containerStatus.State = v1.ContainerState{
 				Running: &v1.ContainerStateRunning{
 					StartedAt: startTime,
 				},
 			}
-			containerStatus.Ready = true
+			containerStatus.Ready = isReady
 			trueVal := true
 			containerStatus.Started = &trueVal
 		} else {
@@ -1715,7 +1874,7 @@ func (p *Provider) translateRunPodStatus(runpodStatus string, statusMessage stri
 
 	// Create pod conditions
 	readyCondition := v1.ConditionFalse
-	if phase == v1.PodRunning {
+	if phase == v1.PodRunning && isReady {
 		readyCondition = v1.ConditionTrue
 	}
 
