@@ -1292,6 +1292,9 @@ func (p *Provider) LoadRunning() {
 	ownPrefix := fmt.Sprintf("k8s-%s--", p.config.ClusterID)
 
 	existingRunPodMap := p.mapExistingRunPodInstances()
+	// TODO: Orphan cleanup temporarily disabled — suspected race condition where
+	// newly created RunPod instances get terminated before their K8s pod receives
+	// the PodIDAnnotation. Re-enable after adding grace period or STARTING status check.
 	for _, runpodInstance := range runningPods {
 		if _, exists := existingRunPodMap[runpodInstance.ID]; !exists {
 			// Only clean up instances that belong to this cluster
@@ -1303,22 +1306,22 @@ func (p *Provider) LoadRunning() {
 				continue
 			}
 
-			p.logger.Warn("Found orphaned RunPod instance with no Kubernetes pod — terminating to stop billing",
+			p.logger.Warn("Found orphaned RunPod instance with no Kubernetes pod — skipping termination (cleanup disabled)",
 				"runpodID", runpodInstance.ID,
 				"name", runpodInstance.Name,
 				"status", runpodInstance.CurrentStatus,
 				"costPerHr", runpodInstance.CostPerHr)
 
-			if err := p.runpodClient.TerminatePod(runpodInstance.ID); err != nil {
-				p.logger.Error("Failed to terminate orphaned RunPod instance",
-					"runpodID", runpodInstance.ID,
-					"name", runpodInstance.Name,
-					"error", err)
-			} else {
-				p.logger.Info("Successfully terminated orphaned RunPod instance",
-					"runpodID", runpodInstance.ID,
-					"name", runpodInstance.Name)
-			}
+			// if err := p.runpodClient.TerminatePod(runpodInstance.ID); err != nil {
+			// 	p.logger.Error("Failed to terminate orphaned RunPod instance",
+			// 		"runpodID", runpodInstance.ID,
+			// 		"name", runpodInstance.Name,
+			// 		"error", err)
+			// } else {
+			// 	p.logger.Info("Successfully terminated orphaned RunPod instance",
+			// 		"runpodID", runpodInstance.ID,
+			// 		"name", runpodInstance.Name)
+			// }
 		}
 	}
 
