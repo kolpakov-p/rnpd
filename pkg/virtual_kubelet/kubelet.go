@@ -1509,17 +1509,13 @@ func (p *Provider) cleanupOrphanedRunPodInstances() {
 // fetchRunPodInstances fetches running, starting, and exited pods from the RunPod API.
 // STARTING pods are included in the "running" list to prevent duplicate creation on kubelet restart.
 func (p *Provider) fetchRunPodInstances() (running []RunPodInstance, exited []RunPodInstance, ok bool) {
-	// Make a request to the RunPod API to get all running pods
+	// Make a request to the RunPod API to get all running pods.
+	// NOTE: RunPod API only supports desiredStatus=RUNNING|EXITED|TERMINATED.
+	// STARTING pods are not queryable — they will appear as RUNNING once ready.
 	runningPods, ok := p.fetchRunPodInstancesByStatus("RUNNING")
 	if !ok {
 		return nil, nil, false
 	}
-
-	// Also fetch STARTING pods — these are instances that exist but haven't reached RUNNING yet.
-	// Without this, a kubelet restart while a pod is STARTING would create a duplicate instance.
-	startingPods, _ := p.fetchRunPodInstancesByStatus("STARTING")
-	// Merge starting into running for reconciliation purposes
-	runningPods = append(runningPods, startingPods...)
 
 	// Also check for exited pods
 	exitedPods, _ := p.fetchRunPodInstancesByStatus("EXITED")
