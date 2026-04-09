@@ -2,7 +2,7 @@ apiVersion: v2
 name: runpod-kubelet
 description: A Helm chart for deploying RunPod Virtual Kubelet
 type: application
-version: 0.2.1
+version: 0.3.0
 appVersion: "latest"
 home: https://github.com/kolpakov-p/rnpd
 sources:
