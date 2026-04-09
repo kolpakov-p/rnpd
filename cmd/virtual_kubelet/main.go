@@ -52,6 +52,10 @@ var (
 	kubenamespace       string
 	datacenterIDs       string
 	clusterID           string
+	nodeCapacityCPU     string
+	nodeCapacityMemory  string
+	nodeCapacityGPU     string
+	nodeCapacityPods    string
 )
 
 // Log handlers are defined in a separate file
@@ -70,6 +74,10 @@ func init() {
 	flag.StringVar(&kubenamespace, "namespace", "kube-system", "kubernetes namespace")
 	flag.StringVar(&datacenterIDs, "datacenter-ids", "", "Comma-separated list of RunPod datacenter IDs to launch pods in")
 	flag.StringVar(&clusterID, "cluster-id", "", "Unique cluster identifier (e.g. 'prod', 'staging'). Required. Used to tag RunPod instances and prevent cross-cluster interference.")
+	flag.StringVar(&nodeCapacityCPU, "node-capacity-cpu", "100", "Virtual CPU capacity reported to K8s scheduler")
+	flag.StringVar(&nodeCapacityMemory, "node-capacity-memory", "1Ti", "Virtual memory capacity reported to K8s scheduler")
+	flag.StringVar(&nodeCapacityGPU, "node-capacity-gpu", "100", "Virtual GPU capacity reported to K8s scheduler")
+	flag.StringVar(&nodeCapacityPods, "node-capacity-pods", "100", "Virtual max pods reported to K8s scheduler")
 }
 
 // LoadConfig loads configuration from a YAML file
@@ -362,6 +370,10 @@ func main() {
 	// Update config with command line flags
 	providerConfig.DatacenterIDs = datacenterIDs
 	providerConfig.ClusterID = clusterID
+	providerConfig.NodeCapacityCPU = nodeCapacityCPU
+	providerConfig.NodeCapacityMemory = nodeCapacityMemory
+	providerConfig.NodeCapacityGPU = nodeCapacityGPU
+	providerConfig.NodeCapacityPods = nodeCapacityPods
 	provider, err := runpod.NewProvider(
 		ctx,
 		nodeName,

@@ -29,4 +29,17 @@ type Config struct {
 	// the same RunPod account don't interfere with each other's instances.
 	// Required — kubelet will refuse to start without it.
 	ClusterID string
+
+	// NodeCapacityCPU is the CPU capacity reported to the Kubernetes scheduler.
+	// This is a virtual limit — RunPod pods run on remote machines, not on this node.
+	NodeCapacityCPU string
+
+	// NodeCapacityMemory is the memory capacity reported to the Kubernetes scheduler.
+	NodeCapacityMemory string
+
+	// NodeCapacityGPU is the GPU capacity reported to the Kubernetes scheduler.
+	NodeCapacityGPU string
+
+	// NodeCapacityPods is the max pod count reported to the Kubernetes scheduler.
+	NodeCapacityPods string
 }
