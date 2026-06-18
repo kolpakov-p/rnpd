@@ -25,7 +25,7 @@ import (
 // Provider implements the virtual-kubelet provider interface for RunPod
 type Provider struct {
 	nodeName           string
-	clientset          *kubernetes.Clientset
+	clientset          kubernetes.Interface
 	operatingSystem    string
 	internalIP         string
 	daemonEndpointPort int
@@ -76,6 +76,7 @@ func (p *Provider) startPeriodicCleanup() {
 		case <-ticker.C:
 			p.cleanupDeletedPods()
 			p.cleanupStuckTerminatingPods()
+			p.cleanupFailedPods()
 			p.cleanupOrphanedRunPodInstances()
 		}
 	}
@@ -97,7 +98,7 @@ func (p *Provider) checkRunPodAPIHealth() {
 
 // NewProvider creates a new RunPod virtual kubelet provider
 func NewProvider(ctx context.Context, nodeName, operatingSystem string, internalIP string,
-	daemonEndpointPort int, config config.Config, clientset *kubernetes.Clientset, logger *slog.Logger) (*Provider, error) {
+	daemonEndpointPort int, config config.Config, clientset kubernetes.Interface, logger *slog.Logger) (*Provider, error) {
 
 	// Create a new RunPod client and pass the clientset and config
 	runpodClient := NewRunPodClient(logger, clientset, &config)
@@ -122,6 +123,7 @@ func NewProvider(ctx context.Context, nodeName, operatingSystem string, internal
 	// Initialize provider
 	provider.checkRunPodAPIHealth()
 	provider.cleanupStuckTerminatingPods()
+	provider.cleanupFailedPods()
 
 	// Start background processes
 	go provider.startPeriodicStatusUpdates()
@@ -1170,6 +1172,91 @@ func (p *Provider) cleanupDeletedPods() {
 	}
 }
 
+// failedPodTTL is the minimum age of a Failed pod before cleanupFailedPods removes it.
+// Buffers in-flight reconciliation and leaves a short window for operator inspection;
+// real diagnostics live in the provider's logs, not on the pod object.
+const failedPodTTL = 5 * time.Minute
+
+// cleanupFailedPods removes terminal Failed pods on this node older than failedPodTTL.
+// Closes the GC gap left by processPendingPods / translateRunPodStatus, which mark pods
+// Failed but never delete them — the cluster-wide podGC threshold (default 12500) won't
+// fire on a single virtual node before zombies accumulate into etcd pressure.
+// Authority to delete here rests on spec.nodeName=<virtual node>: this node has no real
+// kubelet, so any Failed pod on it was Failed-marked by this provider.
+func (p *Provider) cleanupFailedPods() {
+	pods, err := p.clientset.CoreV1().Pods("").List(
+		context.Background(),
+		metav1.ListOptions{
+			FieldSelector: fmt.Sprintf("spec.nodeName=%s,status.phase=%s", p.nodeName, v1.PodFailed),
+		},
+	)
+	if err != nil {
+		p.logger.Error("cleanup_failed_pods list failed", "err", err)
+		return
+	}
+
+	scanned := len(pods.Items)
+	deleted := 0
+	skipped := 0
+
+	for i := range pods.Items {
+		pod := &pods.Items[i]
+
+		// Belt-and-suspenders: the field selector already filters phase server-side,
+		// but fake clients ignore status field selectors and a future API change shouldn't
+		// silently turn this into a delete-anything loop.
+		if pod.Status.Phase != v1.PodFailed {
+			skipped++
+			continue
+		}
+
+		if pod.DeletionTimestamp != nil {
+			skipped++
+			continue
+		}
+
+		age := failedPodAge(pod)
+		if age < failedPodTTL {
+			skipped++
+			continue
+		}
+
+		reason := fmt.Sprintf("cleanup_failed_pods: TTL expired (status.reason=%q, age=%s)", pod.Status.Reason, age.Truncate(time.Second))
+		if err := p.forceDeleteK8sPod(pod.Namespace, pod.Name, reason); err != nil {
+			p.logger.Error("cleanup_failed_pods delete failed",
+				"pod", pod.Name,
+				"namespace", pod.Namespace,
+				"reason", pod.Status.Reason,
+				"age", age,
+				"err", err)
+			continue
+		}
+		deleted++
+	}
+
+	if scanned > 0 || deleted > 0 {
+		p.logger.Info("cleanup_failed_pods", "scanned", scanned, "deleted", deleted, "skipped", skipped, "ttl", failedPodTTL)
+	}
+}
+
+// failedPodAge approximates time since the pod entered Failed by taking the most recent
+// observable timestamp on the object. Avoids storing our own "failed-at" annotation,
+// so the value survives provider restart without persistent state.
+func failedPodAge(pod *v1.Pod) time.Duration {
+	latest := pod.CreationTimestamp.Time
+	for _, c := range pod.Status.Conditions {
+		if c.LastTransitionTime.After(latest) {
+			latest = c.LastTransitionTime.Time
+		}
+	}
+	for _, cs := range pod.Status.ContainerStatuses {
+		if cs.State.Terminated != nil && cs.State.Terminated.FinishedAt.After(latest) {
+			latest = cs.State.Terminated.FinishedAt.Time
+		}
+	}
+	return time.Since(latest)
+}
+
 // cleanupStuckTerminatingPods finds pods that are stuck in Terminating state
 // and forcefully removes them if they no longer exist in RunPod
 func (p *Provider) cleanupStuckTerminatingPods() {
@@ -1536,7 +1623,6 @@ func (p *Provider) fetchRunPodInstances() (running []RunPodInstance, exited []Ru
 
 	return runningPods, exitedPods, true
 }
-
 
 // fetchRunPodInstancesByStatus fetches RunPod instances with the given status
 func (p *Provider) fetchRunPodInstancesByStatus(status string) ([]RunPodInstance, bool) {
@@ -2171,7 +2257,7 @@ func (p *Provider) syncEndpointSlices() {
 						Name:      sliceName,
 						Namespace: ns,
 						Labels: map[string]string{
-							"kubernetes.io/service-name":              svc.Name,
+							"kubernetes.io/service-name":             svc.Name,
 							"endpointslice.kubernetes.io/managed-by": managedBy,
 						},
 						OwnerReferences: []metav1.OwnerReference{
